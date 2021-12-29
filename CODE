@@ -1,0 +1,82 @@
+
+
+/////////////// variables //////////////////
+var TrainClass = ee.FeatureCollection('users/svoboj25/NovaLegenda/TrainingPolygons_21_12_09')
+
+var NUTS2 = ee.FeatureCollection('users/svoboj25/NUTS2');  
+
+var bands = ['nd_variance','nd','B12','B8A','B7','B11','B2','B6','B5','B3','B4','B8',"elevation"];
+
+// select an attribute with land cover classes
+//var label ='CLC_Legend';
+var label ='Uroven';
+var year = '2018'
+//Validation point from Pepa
+var validationPepa = ee.FeatureCollection('users/svoboj25/NovaLegenda/ValidPoints_21_11_14')
+
+
+var snimek = ee.Image('users/svoboj25/DG_mosaics/DG_composite_DEM_'+year)
+
+
+//////////////////////////////////////////// 2. KLASIFIKACE ////////////////////////////////////////////
+
+//funkce na random forest klasfikaci, vstupni parametry: snimek, trenovaci data, atribut s typem povrchu a seznam pasem
+var RandomForest = function(Composite, TrainData, Atribute, Bands){
+  var training = Composite.select(bands).sampleRegions({
+    collection: TrainData,
+    properties: [Atribute],
+    scale: 10
+  });
+  
+  var classifier = ee.Classifier.smileRandomForest(NTS,VPS,1,BF,null,1).train({
+    features: training,
+    classProperty: Atribute,
+    inputProperties: Bands
+  });
+  var classified = Composite.select(Bands).classify(classifier).rename('RandomForest').unmask(1);
+
+    var dict = classifier.explain();
+    print("NT:"+NTS+"; VPS: "+VPS+"; BF: "+ BF+": ",dict);
+
+    // count patch sizes
+    var patchsizeL2 = classified.connectedPixelCount(2, false);
+
+    // run a majority filter
+    var filteredL2 = classified.focal_mode(); 
+
+    // updated image with majority filter where patch size is small
+    var L2imageWithMajorityFilter =  classified.where(patchsizeL2.lt(2),filteredL2);
+
+    // Accuracy Assessment - L2
+    var AAL2 = L2imageWithMajorityFilter.reduceRegions({
+      collection: validationPepa,
+      reducer: ee.Reducer.median(),
+      scale: 1}); 
+
+    var testAccuracyL2 = AAL2.errorMatrix('class_2', 'median');  
+    print("NT:"+NTS+"; VPS: "+VPS+"; BF: "+ BF+": ", testAccuracyL2);
+
+    // Export Classified filtered image in 10 m resolution and UTM33
+    Export.image.toDrive({
+      image: L2imageWithMajorityFilter.select('RandomForest').clip(NUTS2),
+      description: 'Year'+year+"NT"+NTS+"VPS"+VPS+"BF"+ BF,
+      maxPixels: 1e9,
+      region: NUTS2,
+      scale: 10,
+      crs: 'EPSG:32633'
+  });  
+  return ;
+};
+
+//Parametry klasifikace
+var NTS = 0; //Number of Trees
+var VPS = 0;
+var BF  = 0;
+
+//////////////////////////////////////////// 4. HLEDANI VHODNYCH PARAMETRU ////////////////////////////////////////////
+for (NTS = 50; NTS < 401; NTS=NTS+25) {
+  for (VPS = 1; VPS <7; VPS=VPS+1){
+   for (BF = 0.1; BF <0.51; BF=BF+0.1){
+  
+    var RFResult = RandomForest(snimek.select(bands),TrainClass,label,bands);
+}}}
