@@ -18,7 +18,7 @@ var validationPepa = ee.FeatureCollection('users/svoboj25/NovaLegenda/ValidPoint
 var snimek = ee.Image('users/svoboj25/DG_mosaics/DG_composite_DEM_'+year)
 
 
-//////////////////////////////////////////// 2. KLASIFIKACE ////////////////////////////////////////////
+//////////////////////////////////////////// 2. Classification ////////////////////////////////////////////
 
 //funkce na random forest klasfikaci, vstupni parametry: snimek, trenovaci data, atribut s typem povrchu a seznam pasem
 var RandomForest = function(Composite, TrainData, Atribute, Bands){
@@ -68,12 +68,13 @@ var RandomForest = function(Composite, TrainData, Atribute, Bands){
   return ;
 };
 
-//Parametry klasifikace
+//////////////////////////////////////////// 4. Grid search ////////////////////////////////////////////
+
+//model hyperparparametres initalisation
 var NTS = 0; //Number of Trees
 var VPS = 0;
 var BF  = 0;
 
-//////////////////////////////////////////// 4. HLEDANI VHODNYCH PARAMETRU ////////////////////////////////////////////
 for (NTS = 50; NTS < 401; NTS=NTS+25) {
   for (VPS = 1; VPS <7; VPS=VPS+1){
    for (BF = 0.1; BF <0.51; BF=BF+0.1){
