@@ -1,0 +1,270 @@
+var S2 = ee.ImageCollection("COPERNICUS/S2_SR"),
+    geometry = 
+    ee.Geometry.MultiPoint(),
+    geometry2 = 
+    ee.Geometry.Polygon(
+        [[[17.043510798476298, 49.111679314030276],
+          [17.043510798476298, 48.89365916603839],
+          [17.743889216445048, 48.89365916603839],
+          [17.743889216445048, 49.111679314030276]]], null, false);
+
+var year = '2018';
+
+var NUTS3 = ee.FeatureCollection('users/svoboj25/NUTS2')//.buffer(1000);  
+
+var NUTS2 = ee.FeatureCollection(ee.Feature(NUTS3.first()).buffer(8000));
+
+
+
+var startDate = year + '-05-01';
+var endDate = year + '-07-31';
+
+var startDate2 = year + '-05-01';
+var endDate2 = year + '-10-30';
+
+var cloudyness2 = 65;
+//select bands
+var bands = ['B2','B3','B4','B5','B6','B7','B8','B8A','B11','B12','nd','nd_variance',"elevation"];
+
+ 
+///////////////////functions/////////////////
+
+// NDVI
+var addQualityBands = function(image) {
+  return image.addBands(image.expression(
+    '10000 * ((NIR - RED) / (NIR + RED)) + 10000', {
+      'NIR': image.select('B8'),
+      'RED': image.select('B4')}).rename('nd').toUint16()
+      )};
+
+// NDVI 
+var addQualityBands2 = function(image) {
+  return image.addBands(image.expression(
+    '(NIR - RED) / (NIR + RED)', {
+      'NIR': image.select('B8'),
+      'RED': image.select('B4')}).rename('nd')
+      )}; 
+
+ 
+//////////////////////////////// S2CLOUDLESS ////////////////////////////////
+
+//Predefined parameters
+var CLD_PRB_THRESH = 40;
+var NIR_DRK_THRESH = 0.15;
+var CLD_PRJ_DIST = 1;
+var BUFFER = 55;
+
+//Load S2 cloud probability collection
+var s2_cloudless_col = ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY')
+                      .filterDate(startDate, endDate)
+                      .filterBounds(NUTS2);
+
+//Load S2 collection
+var filtered = S2.filterDate(startDate, endDate)
+              .filterBounds(NUTS2)
+
+//Join the collections 
+var joinedColl = ee.ImageCollection(ee.Join.saveFirst('s2cloudless').apply
+({'primary': filtered,
+    'secondary': s2_cloudless_col,
+    'condition': ee.Filter.equals({
+    'leftField': 'system:index',
+    'rightField': 'system:index'
+    })
+  }));
+
+//Define cloud mask functions
+function add_cloud_bands(img){
+  //Get s2cloudless image, subset the probability band.
+  var cld_prb = ee.Image(img.get('s2cloudless')).select('probability');
+  
+  //Condition s2cloudless by the probability threshold value.
+  var is_cloud = cld_prb.gt(CLD_PRB_THRESH).rename('clouds');
+  
+  //Add the cloud probability layer and cloud mask as image bands.
+  return img.addBands(ee.Image([cld_prb, is_cloud]));
+}  
+
+function add_shadow_bands(img){
+  //Identify water pixels from the SCL band.
+  var not_water = img.select('SCL').neq(6);
+  
+  //Identify dark NIR pixels that are not water (potential cloud shadow pixels).
+  var SR_BAND_SCALE = 1e4;
+  var dark_pixels = img.select('B8').lt(NIR_DRK_THRESH*SR_BAND_SCALE).multiply(not_water).rename('dark_pixels');
+  
+  //Determine the direction to project cloud shadow from clouds (assumes UTM projection).
+  var shadow_azimuth = ee.Number(90).subtract(ee.Number(img.get('MEAN_SOLAR_AZIMUTH_ANGLE')));
+  
+  //Project shadows from clouds for the distance specified by the CLD_PRJ_DIST input.
+  var cld_proj = img.select('clouds').directionalDistanceTransform(shadow_azimuth, CLD_PRJ_DIST*10)
+  .reproject({'crs': img.select(0).projection(), 'scale': 100})
+  .select('distance')
+  .mask()
+  .rename('cloud_transform');
+
+  //Identify the intersection of dark pixels with cloud shadow projection.
+  var shadows = cld_proj.multiply(dark_pixels).rename('shadows');
+
+  //Add dark pixels, cloud projection, and identified shadows as image bands.
+  return img.addBands(ee.Image([dark_pixels, cld_proj, shadows]));
+}
+
+function add_cld_shdw_mask(img){
+  //Add cloud component bands.
+  var img_cloud = add_cloud_bands(img);
+
+  //Add cloud shadow component bands.
+  var img_cloud_shadow = add_shadow_bands(img_cloud);
+
+  //Combine cloud and shadow mask, set cloud and shadow as value 1, else 0.
+  var is_cld_shdw0 = img_cloud_shadow.select('clouds').add(img_cloud_shadow.select('shadows')).gt(0);
+
+  //Remove small cloud-shadow patches and dilate remaining pixels by BUFFER input.
+  //20 m scale is for speed, and assumes clouds don't require 10 m precision.
+  var is_cld_shdw = is_cld_shdw0.focal_min(2).focal_max(BUFFER*2/20)
+  .reproject({'crs': img.select([0]).projection(), 'scale': 20})
+  .rename('cloudmask');
+
+  //Add the final cloud-shadow mask to the image.
+  //return img_cloud_shadow.addBands(is_cld_shdw);
+  return img.addBands(is_cld_shdw).updateMask(is_cld_shdw.eq(0)).addBands(img_cloud_shadow);
+}
+
+var cloudlessFINAL = joinedColl.map(add_cld_shdw_mask).sort("CLOUDY_PIXEL_PERCENTAGE",false).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloudyness2));
+
+
+//var cld_prb = ee.Image(img.get('s2cloudless')).select('probability');
+
+//////////////////////////////// S2CLOUDLESS ////////////////////////////////
+// import cloudy Sentinel-2 SR collection
+var S2Collection1 = cloudlessFINAL
+.filterBounds(NUTS2)
+.filterDate(startDate, endDate)
+.map(addQualityBands)
+.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloudyness2))
+.select(['B2','B3','B4','B5','B8','B6','B7','B11','B12','B8A','QA60','SCL','nd']);
+
+// Function for masking out cloudy and other 'disturbing' pixels
+
+// create Image Collection of median composites
+var compositeMedian_S2Cloudless_perc = ee.ImageCollection([
+  S2Collection1.select(['B2','B3','B4','B5','B6','B7','B8','B8A','B11','B12','nd']).median(),
+//  S2Collection1.reduce(ee.Reducer.percentile([40])),
+  ]).mosaic();
+
+
+
+
+
+//////////////////////////////////////// Variance band start /////////////////////////////////////
+
+var cloudyness3 = 65
+
+//Load S2 cloud probability collection
+var s2_cloudless_col2 = ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY')
+                      .filterDate(startDate2, endDate2)
+                      .filterBounds(NUTS2);
+
+//Load S2 collection
+var filtered2 = S2.filterDate(startDate2, endDate2)
+              .filterBounds(NUTS2)
+
+//Join the collections 
+var joinedColl2 = ee.ImageCollection(ee.Join.saveFirst('s2cloudless').apply
+({'primary': filtered2,
+    'secondary': s2_cloudless_col2,
+    'condition': ee.Filter.equals({
+    'leftField': 'system:index',
+    'rightField': 'system:index'
+    })
+}));
+
+var cloudlessFINAL2 = joinedColl2.map(add_cld_shdw_mask);
+
+var maskedCollection = cloudlessFINAL2
+.filterBounds(NUTS2)
+.filterDate(startDate2, endDate2)
+.map(addQualityBands2)
+.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloudyness3))
+.select(['nd',"B8"]);
+
+/*
+var maskedCollection = S2Collection2.map(function(image) {
+  var mask = image.select("B8").eq(1).not(); // Vytvoříme masku, která určuje, které hodnoty nejsou rovny 10
+  return image.updateMask(mask); // Aplikujeme masku na každý snímek v Image Collection
+});
+*/
+
+var S2Collection2 = maskedCollection.map(function(image) {
+  var mask = image.select("nd").lt(0.05).not(); // Vytvoříme masku, která určuje, které hodnoty nejsou rovny 10
+  return image.updateMask(mask); // Aplikujeme masku na každý snímek v Image Collection
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// create Image Collection of median composites
+var composite_nd_STD = ee.ImageCollection([
+  S2Collection1.select(['B2','B4','B3','B5','B6','B7','B8','B11','B12','B8A','nd']).median(),
+//  S2Collection1.reduce(ee.Reducer.percentile([40])),
+  ]).mosaic();
+
+
+var varianceComposite = ee.ImageCollection([
+  S2Collection2.select('nd').reduce(ee.Reducer.variance()),
+  ]).mosaic().unmask(0);
+
+
+
+var nd_variance = varianceComposite.expression( 
+    'VAR * 100000', {
+      'VAR': varianceComposite.select('nd_variance') 
+}).rename('nd_variance').toUint16();
+
+
+//Map.addLayer(nd_variance.select(['nd_variance']).clip(NUTS2), {min: 0, max: 2000}, 'chacha2', true);  
+
+// add NDVI variance
+var snimek = compositeMedian_S2Cloudless_perc
+.addBands(nd_variance.select(['nd_variance'])).clip(NUTS2);
+var SRTM = ee.Image("USGS/SRTMGL1_003").clip(NUTS2); 
+
+var snimek2 = snimek
+.addBands([SRTM.select(['elevation'])]).clip(NUTS2);
+
+Export.image.toAsset({
+  image: snimek2.toUint16().select(bands).clip(NUTS2),
+  description: 'DG_Mosaic_8kmExtended',
+  assetId: 'DG_composite_DEM_'+year,
+  scale: 10,
+  maxPixels: 10000000000000,
+  region: NUTS2,
+  crs: 'EPSG:32633',
+  pyramidingPolicy: {
+    'B2': 'median',
+    'B3': 'median',
+    'B4': 'median',
+    'B5': 'median',
+    'B6': 'median',
+    'B7': 'median',
+    'B8': 'median',
+    'B8A': 'median',
+    'B11': 'median',
+    'B12': 'median',
+    'nd': 'median',
+    'nd_variance': 'median',
+    'elavation': 'median',}
+});
+
+Map.addLayer(snimek2.clip(NUTS2),{min: 0,  max: 2000,  bands: ['B4', 'B3', 'B2']},"S2 mosaic")
